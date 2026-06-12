@@ -8,10 +8,15 @@ import streamlit as st
 
 from scripts.download_prepare_faostat import OUTFILE, prepare
 
+
 st.set_page_config(page_title="FAOSTAT Eastern Europe", layout="wide")
 
 st.title("FAOSTAT: zemědělská produkce a land use ve východní Evropě")
-st.caption("Časové řady od roku 1961 podle dostupnosti v FAOSTAT. U některých států začínají samostatné řady až po rozpadu dřívějších státních celků.")
+st.caption(
+    "Časové řady od roku 1961 podle dostupnosti v FAOSTAT. "
+    "U některých států začínají samostatné řady až po rozpadu dřívějších státních celků."
+)
+
 
 @st.cache_data(show_spinner=True, ttl=24 * 60 * 60)
 def load_data() -> pd.DataFrame:
@@ -20,29 +25,78 @@ def load_data() -> pd.DataFrame:
         return prepare()
     return pd.read_parquet(path)
 
+
 with st.spinner("Načítám data. Při prvním spuštění se stáhnou bulk soubory z FAOSTAT."):
     df = load_data()
 
+
 with st.sidebar:
     st.header("Nastavení")
+
     metric_group = st.selectbox(
         "Datová oblast",
         sorted(df["metric_group"].dropna().unique()),
         index=0,
     )
-    norm = st.radio("Vyjádření", ["Absolutně", "Na osobu"], horizontal=True)
+
+    norm = st.radio(
+        "Vyjádření",
+        ["Absolutně", "Na osobu"],
+        horizontal=True,
+    )
+
     year_min, year_max = int(df["year"].min()), int(df["year"].max())
-    years = st.slider("Roky", year_min, year_max, (1961, year_max))
+
+    years = st.slider(
+        "Roky",
+        year_min,
+        year_max,
+        (1961, year_max),
+    )
+
     countries = st.multiselect(
         "Země",
         sorted(df["area"].dropna().unique()),
         default=sorted(df["area"].dropna().unique()),
     )
-    top_n = st.slider("Kolik největších položek zobrazit v každé zemi", 3, 20, 8)
-    chart_type = st.radio("Typ grafu", ["Plošný kumulativní", "Čárový"], horizontal=False)
 
-base = df[(df["metric_group"] == metric_group) & (df["area"].isin(countries))]
-base = base[(base["year"] >= years[0]) & (base["year"] <= years[1])]
+    top_n = st.slider(
+        "Kolik největších položek zobrazit v každé zemi",
+        3,
+        20,
+        8,
+    )
+
+    chart_type = st.radio(
+        "Typ grafu",
+        ["Plošný kumulativní", "Čárový"],
+        horizontal=False,
+    )
+
+    n_cols = st.slider(
+        "Počet grafů v řádku",
+        1,
+        4,
+        3,
+    )
+
+    chart_height = st.slider(
+        "Výška grafu",
+        220,
+        500,
+        280,
+    )
+
+
+base = df[
+    (df["metric_group"] == metric_group)
+    & (df["area"].isin(countries))
+].copy()
+
+base = base[
+    (base["year"] >= years[0])
+    & (base["year"] <= years[1])
+].copy()
 
 value_col = "value" if norm == "Absolutně" else "value_per_capita"
 y_label = "hodnota" if norm == "Absolutně" else "hodnota na osobu"
@@ -53,26 +107,76 @@ if base.empty:
     st.warning("Pro zadané filtry nejsou dostupná data.")
     st.stop()
 
+
 # Summary panel
 c1, c2, c3 = st.columns(3)
 c1.metric("Země", base["area"].nunique())
 c2.metric("Roky", f"{int(base['year'].min())}–{int(base['year'].max())}")
 c3.metric("Řádků dat", f"{len(base):,}".replace(",", " "))
 
-with st.sidebar:
-    n_cols = st.slider("Počet grafů v řádku", 1, 4, 3)
-    chart_height = st.slider("Výška grafu", 220, 500, 280)
 
-selected_countries = [c for c in countries if not base[base["area"] == c].empty]
-# Sticky shared legend
-legend_series = (
-    base.groupby("series", as_index=False)[value_col]
+selected_countries = [
+    country for country in countries
+    if not base[base["area"] == country].empty
+]
+
+
+# -------------------------------------------------------------------
+# Shared legend preparation
+# -------------------------------------------------------------------
+# We first identify all series that will appear in at least one country chart.
+# This is necessary so that the shared legend corresponds to the actual charts.
+
+visible_series = set()
+
+for country in selected_countries:
+    d_country = base[base["area"] == country].copy()
+
+    if d_country.empty:
+        continue
+
+    latest_year = d_country.groupby("series")["year"].max().rename("latest_year")
+    latest = d_country.merge(latest_year, on="series")
+    latest = latest[latest["year"] == latest["latest_year"]]
+
+    country_top_series = (
+        latest.groupby("series", as_index=False)[value_col]
+        .sum()
+        .sort_values(value_col, ascending=False)
+        .head(top_n)["series"]
+        .tolist()
+    )
+
+    visible_series.update(country_top_series)
+
+
+series_order = (
+    base[base["series"].isin(visible_series)]
+    .groupby("series", as_index=False)[value_col]
     .sum()
-    .sort_values(value_col, ascending=False)
-    .head(top_n)["series"]
+    .sort_values(value_col, ascending=False)["series"]
     .tolist()
 )
 
+# "Other" is used in country charts for all non-top categories.
+if "Other" not in series_order:
+    series_order.append("Other")
+
+
+# Shared color palette for both the sticky legend and all charts.
+palette = (
+    px.colors.qualitative.Plotly
+    + px.colors.qualitative.Dark24
+    + px.colors.qualitative.Light24
+)
+
+color_map = {
+    series: palette[idx % len(palette)]
+    for idx, series in enumerate(series_order)
+}
+
+
+# Sticky shared legend with matching colors.
 legend_html = """
 <style>
 .sticky-legend {
@@ -84,7 +188,7 @@ legend_html = """
     border-radius: 10px;
     padding: 10px 12px;
     margin-bottom: 14px;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
 }
 .sticky-legend-title {
     font-weight: 700;
@@ -93,20 +197,34 @@ legend_html = """
 .sticky-legend-items {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px 14px;
-    font-size: 13px;
+    gap: 7px 13px;
+    font-size: 12px;
+    line-height: 1.25;
 }
 .sticky-legend-item {
     white-space: nowrap;
 }
+.legend-dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    margin-right: 5px;
+}
 </style>
+
 <div class="sticky-legend">
-  <div class="sticky-legend-title">Legenda</div>
+  <div class="sticky-legend-title">Společná legenda</div>
   <div class="sticky-legend-items">
 """
 
-for item in legend_series:
-    legend_html += f'<div class="sticky-legend-item">● {item}</div>'
+for item in series_order:
+    color = color_map.get(item, "#999999")
+    legend_html += (
+        f'<div class="sticky-legend-item">'
+        f'<span class="legend-dot" style="background:{color};"></span>{item}'
+        f'</div>'
+    )
 
 legend_html += """
   </div>
@@ -114,15 +232,22 @@ legend_html += """
 """
 
 st.markdown(legend_html, unsafe_allow_html=True)
+
+
+# -------------------------------------------------------------------
+# Country chart grid
+# -------------------------------------------------------------------
+
 for i in range(0, len(selected_countries), n_cols):
     cols = st.columns(n_cols)
 
     for j, country in enumerate(selected_countries[i:i + n_cols]):
         d = base[base["area"] == country].copy()
+
         if d.empty:
             continue
 
-        # Choose top series by latest available value and aggregate remaining as Other.
+        # Choose top series by latest available value and aggregate the remaining series as Other.
         latest_year = d.groupby("series")["year"].max().rename("latest_year")
         latest = d.merge(latest_year, on="series")
         latest = latest[latest["year"] == latest["latest_year"]]
@@ -135,8 +260,24 @@ for i in range(0, len(selected_countries), n_cols):
             .tolist()
         )
 
-        d["series_plot"] = d["series"].where(d["series"].isin(top_series), "Other")
-        plot = d.groupby(["year", "series_plot"], as_index=False)[value_col].sum()
+        d["series_plot"] = d["series"].where(
+            d["series"].isin(top_series),
+            "Other",
+        )
+
+        plot = (
+            d.groupby(["year", "series_plot"], as_index=False)[value_col]
+            .sum()
+        )
+
+        # Make sure Plotly uses the same category order as the shared legend.
+        plot["series_plot"] = pd.Categorical(
+            plot["series_plot"],
+            categories=series_order,
+            ordered=True,
+        )
+
+        plot = plot.sort_values(["series_plot", "year"])
 
         with cols[j]:
             with st.container(border=True):
@@ -148,6 +289,8 @@ for i in range(0, len(selected_countries), n_cols):
                         x="year",
                         y=value_col,
                         color="series_plot",
+                        color_discrete_map=color_map,
+                        category_orders={"series_plot": series_order},
                         labels={
                             "year": "rok",
                             value_col: y_label,
@@ -160,6 +303,8 @@ for i in range(0, len(selected_countries), n_cols):
                         x="year",
                         y=value_col,
                         color="series_plot",
+                        color_discrete_map=color_map,
+                        category_orders={"series_plot": series_order},
                         labels={
                             "year": "rok",
                             value_col: y_label,
@@ -168,22 +313,38 @@ for i in range(0, len(selected_countries), n_cols):
                     )
 
                 fig.update_layout(
-    height=chart_height,
-    showlegend=False,
-    margin=dict(l=5, r=5, t=25, b=5),
-    font=dict(size=10),
-)
+                    height=chart_height,
+                    showlegend=False,
+                    margin=dict(l=5, r=5, t=25, b=5),
+                    font=dict(size=10),
+                )
 
-                fig.update_xaxes(title_font=dict(size=10), tickfont=dict(size=9))
-                fig.update_yaxes(title_font=dict(size=10), tickfont=dict(size=9))
+                fig.update_xaxes(
+                    title_font=dict(size=10),
+                    tickfont=dict(size=9),
+                )
+
+                fig.update_yaxes(
+                    title_font=dict(size=10),
+                    tickfont=dict(size=9),
+                )
 
                 st.plotly_chart(fig, use_container_width=True)
 
                 with st.expander("Data"):
-                    st.dataframe(plot, use_container_width=True, hide_index=True)
+                    st.dataframe(
+                        plot,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
                     st.download_button(
                         "CSV",
                         data=plot.to_csv(index=False).encode("utf-8"),
-                        file_name=f"faostat_{country.replace(' ', '_')}_{metric_group.replace(' ', '_')}.csv",
+                        file_name=(
+                            f"faostat_"
+                            f"{country.replace(' ', '_')}_"
+                            f"{metric_group.replace(' ', '_')}.csv"
+                        ),
                         mime="text/csv",
                     )
