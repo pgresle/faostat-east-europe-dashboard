@@ -30,12 +30,28 @@ with st.spinner("Načítám data. Při prvním spuštění se stáhnou bulk soub
     df = load_data()
 
 
+# -------------------------------------------------------------------
+# Sidebar controls
+# -------------------------------------------------------------------
+
 with st.sidebar:
     st.header("Nastavení")
 
     metric_group = st.selectbox(
         "Datová oblast",
         sorted(df["metric_group"].dropna().unique()),
+        index=0,
+    )
+
+    available_units = sorted(
+        df.loc[df["metric_group"] == metric_group, "unit"]
+        .dropna()
+        .unique()
+    )
+
+    selected_unit = st.selectbox(
+        "Jednotka FAOSTAT",
+        available_units,
         index=0,
     )
 
@@ -88,8 +104,13 @@ with st.sidebar:
     )
 
 
+# -------------------------------------------------------------------
+# Filter data
+# -------------------------------------------------------------------
+
 base = df[
     (df["metric_group"] == metric_group)
+    & (df["unit"] == selected_unit)
     & (df["area"].isin(countries))
 ].copy()
 
@@ -99,20 +120,30 @@ base = base[
 ].copy()
 
 value_col = "value" if norm == "Absolutně" else "value_per_capita"
-y_label = "hodnota" if norm == "Absolutně" else "hodnota na osobu"
 
-st.subheader(f"{metric_group} — {norm.lower()}")
+if norm == "Absolutně":
+    y_label = f"hodnota [{selected_unit}]"
+else:
+    y_label = f"hodnota na osobu [{selected_unit}/osobu]"
+
+
+st.subheader(f"{metric_group} — {norm.lower()} — jednotka: {selected_unit}")
 
 if base.empty:
     st.warning("Pro zadané filtry nejsou dostupná data.")
     st.stop()
 
 
+# -------------------------------------------------------------------
 # Summary panel
-c1, c2, c3 = st.columns(3)
+# -------------------------------------------------------------------
+
+c1, c2, c3, c4 = st.columns(4)
+
 c1.metric("Země", base["area"].nunique())
 c2.metric("Roky", f"{int(base['year'].min())}–{int(base['year'].max())}")
 c3.metric("Řádků dat", f"{len(base):,}".replace(",", " "))
+c4.metric("Jednotka", selected_unit)
 
 
 selected_countries = [
@@ -124,8 +155,8 @@ selected_countries = [
 # -------------------------------------------------------------------
 # Shared legend preparation
 # -------------------------------------------------------------------
-# We first identify all series that will appear in at least one country chart.
-# This is necessary so that the shared legend corresponds to the actual charts.
+# First, identify all series that will appear in at least one country chart.
+# This ensures that the shared legend corresponds to the actual plotted series.
 
 visible_series = set()
 
@@ -176,7 +207,10 @@ color_map = {
 }
 
 
-# Sticky shared legend with matching colors.
+# -------------------------------------------------------------------
+# Sticky shared legend
+# -------------------------------------------------------------------
+
 legend_html = """
 <style>
 .sticky-legend {
@@ -211,6 +245,11 @@ legend_html = """
     border-radius: 50%;
     margin-right: 5px;
 }
+.unit-note {
+    font-size: 12px;
+    color: #6b7280;
+    margin-top: 6px;
+}
 </style>
 
 <div class="sticky-legend">
@@ -226,8 +265,9 @@ for item in series_order:
         f'</div>'
     )
 
-legend_html += """
+legend_html += f"""
   </div>
+  <div class="unit-note">Jednotka grafů: {selected_unit}</div>
 </div>
 """
 
@@ -320,11 +360,13 @@ for i in range(0, len(selected_countries), n_cols):
                 )
 
                 fig.update_xaxes(
+                    title_text="rok",
                     title_font=dict(size=10),
                     tickfont=dict(size=9),
                 )
 
                 fig.update_yaxes(
+                    title_text=y_label,
                     title_font=dict(size=10),
                     tickfont=dict(size=9),
                 )
@@ -344,7 +386,8 @@ for i in range(0, len(selected_countries), n_cols):
                         file_name=(
                             f"faostat_"
                             f"{country.replace(' ', '_')}_"
-                            f"{metric_group.replace(' ', '_')}.csv"
+                            f"{metric_group.replace(' ', '_')}_"
+                            f"{selected_unit.replace(' ', '_')}.csv"
                         ),
                         mime="text/csv",
                     )
