@@ -64,7 +64,56 @@ with st.sidebar:
     chart_height = st.slider("Výška grafu", 220, 500, 280)
 
 selected_countries = [c for c in countries if not base[base["area"] == c].empty]
+# Sticky shared legend
+legend_series = (
+    base.groupby("series", as_index=False)[value_col]
+    .sum()
+    .sort_values(value_col, ascending=False)
+    .head(top_n)["series"]
+    .tolist()
+)
 
+legend_html = """
+<style>
+.sticky-legend {
+    position: sticky;
+    top: 0;
+    z-index: 999;
+    background: white;
+    border: 1px solid #e5e7eb;
+    border-radius: 10px;
+    padding: 10px 12px;
+    margin-bottom: 14px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+}
+.sticky-legend-title {
+    font-weight: 700;
+    margin-bottom: 6px;
+}
+.sticky-legend-items {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 14px;
+    font-size: 13px;
+}
+.sticky-legend-item {
+    white-space: nowrap;
+}
+</style>
+<div class="sticky-legend">
+  <div class="sticky-legend-title">Legenda</div>
+  <div class="sticky-legend-items">
+"""
+
+for item in legend_series:
+    legend_html += f'<div class="sticky-legend-item">● {item}</div>'
+
+legend_html += """
+  </div>
+</div>
+"""
+
+st.markdown(legend_html, unsafe_allow_html=True)
 for i in range(0, len(selected_countries), n_cols):
     cols = st.columns(n_cols)
 
@@ -119,11 +168,11 @@ for i in range(0, len(selected_countries), n_cols):
                     )
 
                 fig.update_layout(
-                    height=chart_height,
-                    legend_title_text="",
-                    margin=dict(l=5, r=5, t=25, b=5),
-                    font=dict(size=10),
-                )
+    height=chart_height,
+    showlegend=False,
+    margin=dict(l=5, r=5, t=25, b=5),
+    font=dict(size=10),
+)
 
                 fig.update_xaxes(title_font=dict(size=10), tickfont=dict(size=9))
                 fig.update_yaxes(title_font=dict(size=10), tickfont=dict(size=9))
