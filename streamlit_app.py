@@ -195,11 +195,29 @@ if "Other" not in series_order:
 
 
 # Shared color palette for both the sticky legend and all charts.
-palette = (
-    px.colors.qualitative.Plotly
-    + px.colors.qualitative.Dark24
-    + px.colors.qualitative.Light24
-)
+# Calm land-use / agriculture palette: greens, yellows, browns, reds, blues.
+palette = [
+    "#2E7D32",  # dark green
+    "#66BB6A",  # medium green
+    "#A5D6A7",  # light green
+    "#FBC02D",  # yellow
+    "#F9A825",  # amber
+    "#8D6E63",  # brown
+    "#A1887F",  # light brown
+    "#D84315",  # burnt red
+    "#E57373",  # soft red
+    "#1565C0",  # blue
+    "#64B5F6",  # light blue
+    "#00695C",  # teal green
+    "#9E9D24",  # olive
+    "#C0CA33",  # yellow green
+    "#5D4037",  # dark brown
+    "#BCAAA4",  # pale brown
+    "#AD1457",  # muted pink/red
+    "#283593",  # indigo blue
+    "#4FC3F7",  # sky blue
+    "#78909C",  # blue grey
+]
 
 color_map = {
     series: palette[idx % len(palette)]
