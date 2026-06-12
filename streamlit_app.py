@@ -18,6 +18,15 @@ st.caption(
 )
 
 
+REQUIRED_GROUPS = {
+    "Agricultural production",
+    "Harvested area",
+    "Land use",
+    "Livestock products",
+    "Livestock stocks",
+}
+
+
 @st.cache_data(show_spinner=True, ttl=24 * 60 * 60)
 def load_data(force: bool = False) -> pd.DataFrame:
     path = Path(OUTFILE)
@@ -25,12 +34,254 @@ def load_data(force: bool = False) -> pd.DataFrame:
     if force or not path.exists():
         return prepare(force=True)
 
-    return pd.read_parquet(path)
+    data = pd.read_parquet(path)
 
+    existing_groups = set(data["metric_group"].dropna().unique())
+
+    if not REQUIRED_GROUPS.issubset(existing_groups):
+        return prepare(force=True)
+
+    return data
+
+
+# -------------------------------------------------------------------
+# Helper functions
+# -------------------------------------------------------------------
+
+def clean_item_name(item: str) -> str:
+    if pd.isna(item):
+        return ""
+
+    name = str(item)
+
+    replacements = {
+        "Raw milk of cattle": "Cow milk",
+        "Raw milk of buffalo": "Buffalo milk",
+        "Raw milk of sheep": "Sheep milk",
+        "Raw milk of goats": "Goat milk",
+        "Meat of cattle with the bone, fresh or chilled": "Beef",
+        "Meat of pig with the bone, fresh or chilled": "Pig meat",
+        "Meat of chickens, fresh or chilled": "Chicken meat",
+        "Meat of sheep, fresh or chilled": "Sheep meat",
+        "Meat of goat, fresh or chilled": "Goat meat",
+        "Hen eggs in shell, fresh": "Hen eggs",
+        "Eggs from other birds in shell, fresh, n.e.c.": "Other eggs",
+        "Natural honey": "Honey",
+        "Cattle": "Cattle",
+        "Pigs": "Pigs",
+        "Sheep": "Sheep",
+        "Goats": "Goats",
+        "Chickens": "Chickens",
+        "Buffalo": "Buffalo",
+        "Horses": "Horses",
+        "Asses": "Asses",
+        "Mules and hinnies": "Mules and hinnies",
+        "Ducks": "Ducks",
+        "Geese": "Geese",
+        "Turkeys": "Turkeys",
+    }
+
+    return replacements.get(name, name)
+
+
+def add_display_series(data: pd.DataFrame) -> pd.DataFrame:
+    out = data.copy()
+
+    out["item_display"] = out["item"].apply(clean_item_name)
+    out["display_series"] = out["item_display"]
+
+    duplicates = (
+        out.groupby("item_display")["element"]
+        .nunique()
+        .reset_index(name="n_elements")
+    )
+
+    ambiguous_items = set(
+        duplicates.loc[duplicates["n_elements"] > 1, "item_display"]
+    )
+
+    mask = out["item_display"].isin(ambiguous_items)
+
+    out.loc[mask, "display_series"] = (
+        out.loc[mask, "item_display"].astype(str)
+        + " — "
+        + out.loc[mask, "element"].astype(str)
+    )
+
+    return out
+
+
+def make_safe_filename(text: str) -> str:
+    return (
+        str(text)
+        .replace(" ", "_")
+        .replace("/", "-")
+        .replace("\\", "-")
+        .replace("[", "")
+        .replace("]", "")
+        .replace("(", "")
+        .replace(")", "")
+    )
+
+
+def to_tonnes(value: pd.Series, unit: pd.Series) -> pd.Series:
+    out = value.astype(float).copy()
+    u = unit.astype(str).str.lower()
+
+    out.loc[u.str.contains("1000", na=False)] *= 1000
+
+    return out
+
+
+def to_heads(value: pd.Series, unit: pd.Series) -> pd.Series:
+    out = value.astype(float).copy()
+    u = unit.astype(str).str.lower()
+
+    out.loc[u.str.contains("1000", na=False)] *= 1000
+
+    return out
+
+
+def to_hectares(value: pd.Series, unit: pd.Series) -> pd.Series:
+    out = value.astype(float).copy()
+    u = unit.astype(str).str.lower()
+
+    out.loc[u.str.contains("1000", na=False)] *= 1000
+
+    return out
+
+
+def prepare_map_indicators(data: pd.DataFrame, countries: list[str]) -> pd.DataFrame:
+    """
+    Build cumulative choropleth indicators per agricultural land area.
+
+    Indicators:
+    - cereals production per agricultural land area [t/ha]
+    - pulses production per agricultural land area [t/ha]
+    - pigs per agricultural land area [heads/ha]
+    - cattle per agricultural land area [heads/ha]
+    """
+
+    d = data[data["area"].isin(countries)].copy()
+
+    # Agricultural land denominator.
+    land = d[
+        (d["metric_group"] == "Land use")
+        & (d["item"].astype(str).str.contains("Agricultural land", case=False, na=False))
+    ].copy()
+
+    land = land[
+        land["element"].astype(str).str.contains("area", case=False, na=False)
+    ].copy()
+
+    land["agri_land_ha"] = to_hectares(land["value"], land["unit"])
+
+    land = (
+        land.groupby(["area", "year"], as_index=False)["agri_land_ha"]
+        .sum()
+    )
+
+    indicators = []
+
+    # Cereals production.
+    cereals = d[
+        (d["metric_group"] == "Agricultural production")
+        & (
+            d["item"].astype(str).str.contains("Cereals", case=False, na=False)
+            | d["item"].astype(str).str.contains("Wheat|Barley|Rye|Oats|Maize|Rice|Sorghum|Millet", case=False, na=False)
+        )
+        & d["element"].astype(str).str.contains("Production", case=False, na=False)
+    ].copy()
+
+    cereals["numerator"] = to_tonnes(cereals["value"], cereals["unit"])
+
+    cereals = (
+        cereals.groupby(["area", "year"], as_index=False)["numerator"]
+        .sum()
+    )
+
+    cereals["indicator"] = "Cereals production"
+    cereals["unit"] = "t/ha agricultural land"
+    indicators.append(cereals)
+
+    # Pulses production.
+    pulses = d[
+        (d["metric_group"] == "Agricultural production")
+        & (
+            d["item"].astype(str).str.contains("Pulses", case=False, na=False)
+            | d["item"].astype(str).str.contains("Beans|Peas|Lentils|Chick peas|Cow peas|Vetches|Lupins", case=False, na=False)
+        )
+        & d["element"].astype(str).str.contains("Production", case=False, na=False)
+    ].copy()
+
+    pulses["numerator"] = to_tonnes(pulses["value"], pulses["unit"])
+
+    pulses = (
+        pulses.groupby(["area", "year"], as_index=False)["numerator"]
+        .sum()
+    )
+
+    pulses["indicator"] = "Pulses production"
+    pulses["unit"] = "t/ha agricultural land"
+    indicators.append(pulses)
+
+    # Pigs.
+    pigs = d[
+        (d["metric_group"] == "Livestock stocks")
+        & (d["item"].astype(str).str.fullmatch("Pigs", case=False, na=False))
+    ].copy()
+
+    pigs["numerator"] = to_heads(pigs["value"], pigs["unit"])
+
+    pigs = (
+        pigs.groupby(["area", "year"], as_index=False)["numerator"]
+        .sum()
+    )
+
+    pigs["indicator"] = "Pigs"
+    pigs["unit"] = "heads/ha agricultural land"
+    indicators.append(pigs)
+
+    # Cattle / cows.
+    cattle = d[
+        (d["metric_group"] == "Livestock stocks")
+        & (
+            d["item"].astype(str).str.fullmatch("Cattle", case=False, na=False)
+            | d["item"].astype(str).str.fullmatch("Cows", case=False, na=False)
+        )
+    ].copy()
+
+    cattle["numerator"] = to_heads(cattle["value"], cattle["unit"])
+
+    cattle = (
+        cattle.groupby(["area", "year"], as_index=False)["numerator"]
+        .sum()
+    )
+
+    cattle["indicator"] = "Cattle"
+    cattle["unit"] = "heads/ha agricultural land"
+    indicators.append(cattle)
+
+    numerators = pd.concat(indicators, ignore_index=True)
+
+    out = numerators.merge(land, on=["area", "year"], how="left")
+
+    out = out[
+        out["agri_land_ha"].notna()
+        & (out["agri_land_ha"] > 0)
+    ].copy()
+
+    out["value_per_agri_land"] = out["numerator"] / out["agri_land_ha"]
+
+    return out
+
+
+# -------------------------------------------------------------------
+# Load data
+# -------------------------------------------------------------------
 
 with st.sidebar:
     refresh_data = st.button("Obnovit / znovu stáhnout FAOSTAT data")
-
 
 with st.spinner("Načítám data. Při prvním spuštění se stáhnou bulk soubory z FAOSTAT."):
     df = load_data(force=refresh_data)
@@ -41,7 +292,7 @@ with st.spinner("Načítám data. Při prvním spuštění se stáhnou bulk soub
 # -------------------------------------------------------------------
 
 with st.sidebar:
-    st.header("Nastavení")
+    st.header("Nastavení grafů")
 
     metric_group = st.selectbox(
         "Datová oblast",
@@ -111,7 +362,7 @@ with st.sidebar:
 
 
 # -------------------------------------------------------------------
-# Filter data
+# Filter data for country charts
 # -------------------------------------------------------------------
 
 base = df[
@@ -124,6 +375,8 @@ base = base[
     (base["year"] >= years[0])
     & (base["year"] <= years[1])
 ].copy()
+
+base = add_display_series(base)
 
 value_col = "value" if norm == "Absolutně" else "value_per_capita"
 
@@ -163,6 +416,7 @@ selected_countries = [
 # -------------------------------------------------------------------
 
 visible_series = set()
+other_needed = False
 
 for country in selected_countries:
     d_country = base[base["area"] == country].copy()
@@ -170,55 +424,57 @@ for country in selected_countries:
     if d_country.empty:
         continue
 
-    latest_year = d_country.groupby("series")["year"].max().rename("latest_year")
-    latest = d_country.merge(latest_year, on="series")
+    latest_year = d_country.groupby("display_series")["year"].max().rename("latest_year")
+    latest = d_country.merge(latest_year, on="display_series")
     latest = latest[latest["year"] == latest["latest_year"]]
 
     country_top_series = (
-        latest.groupby("series", as_index=False)[value_col]
+        latest.groupby("display_series", as_index=False)[value_col]
         .sum()
         .sort_values(value_col, ascending=False)
-        .head(top_n)["series"]
+        .head(top_n)["display_series"]
         .tolist()
     )
 
     visible_series.update(country_top_series)
 
+    if d_country["display_series"].nunique() > len(country_top_series):
+        other_needed = True
+
 
 series_order = (
-    base[base["series"].isin(visible_series)]
-    .groupby("series", as_index=False)[value_col]
+    base[base["display_series"].isin(visible_series)]
+    .groupby("display_series", as_index=False)[value_col]
     .sum()
-    .sort_values(value_col, ascending=False)["series"]
+    .sort_values(value_col, ascending=False)["display_series"]
     .tolist()
 )
 
-if "Other" not in series_order:
+if other_needed and "Other" not in series_order:
     series_order.append("Other")
 
 
-# Calm land-use / agriculture palette: greens, yellows, browns, reds, blues.
 palette = [
-    "#2E7D32",  # dark green
-    "#66BB6A",  # medium green
-    "#A5D6A7",  # light green
-    "#FBC02D",  # yellow
-    "#F9A825",  # amber
-    "#8D6E63",  # brown
-    "#A1887F",  # light brown
-    "#D84315",  # burnt red
-    "#E57373",  # soft red
-    "#1565C0",  # blue
-    "#64B5F6",  # light blue
-    "#00695C",  # teal green
-    "#9E9D24",  # olive
-    "#C0CA33",  # yellow green
-    "#5D4037",  # dark brown
-    "#BCAAA4",  # pale brown
-    "#AD1457",  # muted pink/red
-    "#283593",  # indigo blue
-    "#4FC3F7",  # sky blue
-    "#78909C",  # blue grey
+    "#2E7D32",
+    "#66BB6A",
+    "#A5D6A7",
+    "#FBC02D",
+    "#F9A825",
+    "#8D6E63",
+    "#A1887F",
+    "#D84315",
+    "#E57373",
+    "#1565C0",
+    "#64B5F6",
+    "#00695C",
+    "#9E9D24",
+    "#C0CA33",
+    "#5D4037",
+    "#BCAAA4",
+    "#AD1457",
+    "#283593",
+    "#4FC3F7",
+    "#78909C",
 ]
 
 color_map = {
@@ -296,7 +552,12 @@ legend_html += f"""
 # Tabs
 # -------------------------------------------------------------------
 
-tab_charts, tab_map = st.tabs(["Grafy podle zemí", "Kartogram Evropy"])
+tab_charts, tab_map = st.tabs(
+    [
+        "Grafy podle zemí",
+        "Kartogramy: produkce a zvířata na zemědělskou půdu",
+    ]
+)
 
 
 # -------------------------------------------------------------------
@@ -315,20 +576,20 @@ with tab_charts:
             if d.empty:
                 continue
 
-            latest_year = d.groupby("series")["year"].max().rename("latest_year")
-            latest = d.merge(latest_year, on="series")
+            latest_year = d.groupby("display_series")["year"].max().rename("latest_year")
+            latest = d.merge(latest_year, on="display_series")
             latest = latest[latest["year"] == latest["latest_year"]]
 
             top_series = (
-                latest.groupby("series", as_index=False)[value_col]
+                latest.groupby("display_series", as_index=False)[value_col]
                 .sum()
                 .sort_values(value_col, ascending=False)
-                .head(top_n)["series"]
+                .head(top_n)["display_series"]
                 .tolist()
             )
 
-            d["series_plot"] = d["series"].where(
-                d["series"].isin(top_series),
+            d["series_plot"] = d["display_series"].where(
+                d["display_series"].isin(top_series),
                 "Other",
             )
 
@@ -411,45 +672,70 @@ with tab_charts:
                             data=plot.to_csv(index=False).encode("utf-8"),
                             file_name=(
                                 f"faostat_"
-                                f"{country.replace(' ', '_')}_"
-                                f"{metric_group.replace(' ', '_')}_"
-                                f"{selected_unit.replace(' ', '_')}.csv"
+                                f"{make_safe_filename(country)}_"
+                                f"{make_safe_filename(metric_group)}_"
+                                f"{make_safe_filename(selected_unit)}.csv"
                             ),
                             mime="text/csv",
                         )
 
 
 # -------------------------------------------------------------------
-# Tab 2: Choropleth map of Europe
+# Tab 2: cumulative choropleth indicators per agricultural land
 # -------------------------------------------------------------------
 
 with tab_map:
-    st.markdown("### Kartogram Evropy")
+    st.markdown("### Kartogramy: kumulativní hodnoty na plochu zemědělské půdy")
 
     st.caption(
-        "Kartogram zobrazuje jednu vybranou položku pro vybraný rok. "
-        "Data jsou filtrována podle stejné datové oblasti, jednotky a vyjádření jako grafy."
+        "Kartogramy počítají agregované indikátory pro vybraný rok. "
+        "Cereals a pulses jsou vyjádřeny jako tuny produkce na hektar zemědělské půdy. "
+        "Pigs a cattle jsou vyjádřeny jako počet kusů na hektar zemědělské půdy."
     )
 
-    map_c1, map_c2 = st.columns([1, 2])
+    map_indicators = prepare_map_indicators(df, countries)
 
-    available_map_years = sorted(base["year"].dropna().unique())
+    map_indicators = map_indicators[
+        (map_indicators["year"] >= years[0])
+        & (map_indicators["year"] <= years[1])
+    ].copy()
+
+    if map_indicators.empty:
+        st.warning("Pro zadané země a roky nejsou dostupná data pro kartogramy.")
+        st.stop()
+
+    map_c1, map_c2 = st.columns([1, 1])
 
     with map_c1:
+        map_indicator = st.selectbox(
+            "Indikátor",
+            [
+                "Cereals production",
+                "Pulses production",
+                "Pigs",
+                "Cattle",
+            ],
+            index=0,
+        )
+
+    available_map_years = sorted(
+        map_indicators.loc[
+            map_indicators["indicator"] == map_indicator,
+            "year",
+        ].dropna().unique()
+    )
+
+    with map_c2:
         map_year = st.selectbox(
-            "Rok pro mapu",
+            "Rok",
             available_map_years,
             index=len(available_map_years) - 1,
         )
 
-    available_map_series = sorted(base["series"].dropna().unique())
-
-    with map_c2:
-        map_series = st.selectbox(
-            "Položka pro kartogram",
-            available_map_series,
-            index=0,
-        )
+    map_data = map_indicators[
+        (map_indicators["indicator"] == map_indicator)
+        & (map_indicators["year"] == map_year)
+    ].copy()
 
     iso3_map = {
         "Albania": "ALB",
@@ -477,16 +763,6 @@ with tab_map:
         "Ukraine": "UKR",
     }
 
-    map_data = base[
-        (base["year"] == map_year)
-        & (base["series"] == map_series)
-    ].copy()
-
-    map_data = (
-        map_data.groupby(["area"], as_index=False)[value_col]
-        .sum()
-    )
-
     map_data["iso3"] = map_data["area"].map(iso3_map)
 
     missing_iso = (
@@ -499,16 +775,20 @@ with tab_map:
     map_data = map_data.dropna(subset=["iso3"])
 
     if map_data.empty:
-        st.warning("Pro vybranou položku a rok nejsou dostupná mapová data.")
+        st.warning("Pro vybraný indikátor a rok nejsou dostupná mapová data.")
     else:
+        map_unit = map_data["unit"].iloc[0]
+
         fig_map = px.choropleth(
             map_data,
             locations="iso3",
-            color=value_col,
+            color="value_per_agri_land",
             hover_name="area",
             hover_data={
                 "iso3": False,
-                value_col: ":,.2f",
+                "numerator": ":,.0f",
+                "agri_land_ha": ":,.0f",
+                "value_per_agri_land": ":,.4f",
             },
             color_continuous_scale=[
                 "#FFF7BC",
@@ -518,9 +798,11 @@ with tab_map:
                 "#993404",
             ],
             labels={
-                value_col: y_label,
+                "value_per_agri_land": map_unit,
+                "numerator": "čitatel",
+                "agri_land_ha": "zemědělská půda [ha]",
             },
-            title=f"{map_series}, {map_year} — {y_label}",
+            title=f"{map_indicator}, {map_year} — {map_unit}",
             scope="europe",
         )
 
@@ -535,15 +817,15 @@ with tab_map:
             height=650,
             margin=dict(l=0, r=0, t=55, b=0),
             coloraxis_colorbar=dict(
-                title=y_label,
+                title=map_unit,
             ),
         )
 
         st.plotly_chart(fig_map, use_container_width=True)
 
-        with st.expander("Data použitá pro mapu"):
+        with st.expander("Data použitá pro kartogram"):
             st.dataframe(
-                map_data.sort_values(value_col, ascending=False),
+                map_data.sort_values("value_per_agri_land", ascending=False),
                 use_container_width=True,
                 hide_index=True,
             )
@@ -553,8 +835,7 @@ with tab_map:
                 data=map_data.to_csv(index=False).encode("utf-8"),
                 file_name=(
                     f"faostat_map_"
-                    f"{metric_group.replace(' ', '_')}_"
-                    f"{selected_unit.replace(' ', '_')}_"
+                    f"{make_safe_filename(map_indicator)}_"
                     f"{map_year}.csv"
                 ),
                 mime="text/csv",
