@@ -10,11 +10,13 @@ import pandas as pd
 import requests
 
 CATALOG_URL = "https://bulks-faostat.fao.org/production/datasets_E.xml"
+
 RAW_DIR = Path("data/raw")
 PROCESSED_DIR = Path("data/processed")
-OUTFILE = PROCESSED_DIR / "faostat_eastern_europe_long.parquet"
 
-# UN M49 Eastern Europe geoscheme; upravte podle potřeby.
+# New filename version so Streamlit does not keep using the old file without livestock data.
+OUTFILE = PROCESSED_DIR / "faostat_eastern_europe_long_v3.parquet"
+
 EASTERN_EUROPE = [
     "Belarus",
     "Bulgaria",
@@ -34,7 +36,6 @@ DATASETS = {
     "OA": "Population and Employment: Annual population",
 }
 
-# Fallbacks are used only if the XML catalogue changes or is temporarily unavailable.
 FALLBACK_URLS = {
     "QCL": [
         "https://bulks-faostat.fao.org/production/Production_Crops_Livestock_E_All_Data_(Normalized).zip",
@@ -61,15 +62,19 @@ def _first_existing_col(df: pd.DataFrame, candidates: Iterable[str]) -> str:
 
 
 def find_bulk_url(dataset_code: str) -> str:
-    """Find All Data Normalized ZIP URL from the FAOSTAT bulk catalogue."""
     try:
-        r = requests.get(CATALOG_URL, timeout=60)
-        r.raise_for_status()
-        root = ET.fromstring(r.content)
+        response = requests.get(CATALOG_URL, timeout=60)
+        response.raise_for_status()
+
+        root = ET.fromstring(response.content)
         candidates: list[str] = []
 
         for ds in root.iter():
-            texts = {child.tag.split("}")[-1]: (child.text or "") for child in list(ds)}
+            texts = {
+                child.tag.split("}")[-1]: (child.text or "")
+                for child in list(ds)
+            }
+
             if texts.get("DatasetCode", "").upper() == dataset_code.upper():
                 for txt in texts.values():
                     if isinstance(txt, str) and txt.startswith("http") and txt.endswith(".zip"):
@@ -105,6 +110,7 @@ def find_bulk_url(dataset_code: str) -> str:
 
 def download_zip(dataset_code: str) -> Path:
     RAW_DIR.mkdir(parents=True, exist_ok=True)
+
     url = find_bulk_url(dataset_code)
     safe_name = re.sub(r"[^A-Za-z0-9_.() -]+", "_", url.split("/")[-1])
     target = RAW_DIR / safe_name
@@ -115,10 +121,11 @@ def download_zip(dataset_code: str) -> Path:
 
     print(f"Downloading {dataset_code}: {url}")
 
-    with requests.get(url, stream=True, timeout=300) as r:
-        r.raise_for_status()
+    with requests.get(url, stream=True, timeout=300) as response:
+        response.raise_for_status()
+
         with open(target, "wb") as f:
-            for chunk in r.iter_content(chunk_size=1024 * 1024):
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
                 if chunk:
                     f.write(chunk)
 
@@ -127,8 +134,9 @@ def download_zip(dataset_code: str) -> Path:
 
 def read_faostat_zip(zip_path: Path) -> pd.DataFrame:
     with zipfile.ZipFile(zip_path) as zf:
-        csvs = [n for n in zf.namelist() if n.lower().endswith(".csv")]
-        main_csv = max(csvs, key=lambda n: zf.getinfo(n).file_size)
+        csvs = [name for name in zf.namelist() if name.lower().endswith(".csv")]
+        main_csv = max(csvs, key=lambda name: zf.getinfo(name).file_size)
+
         with zf.open(main_csv) as f:
             return pd.read_csv(f, encoding="latin1", low_memory=False)
 
@@ -154,10 +162,19 @@ def normalize_columns(df: pd.DataFrame, domain_code: str) -> pd.DataFrame:
         ]
     ].copy()
 
-    out.columns = ["area_code", "area", "item", "element", "year", "unit", "value"]
+    out.columns = [
+        "area_code",
+        "area",
+        "item",
+        "element",
+        "year",
+        "unit",
+        "value",
+    ]
 
     out["domain_code"] = domain_code
     out["domain"] = DATASETS[domain_code]
+
     out["year"] = pd.to_numeric(out["year"], errors="coerce").astype("Int64")
     out["value"] = pd.to_numeric(out["value"], errors="coerce")
 
@@ -172,38 +189,56 @@ def classify_metric(domain_code: str, element: str, unit: str, item: str) -> str
     u = str(unit).lower()
     i = str(item).lower()
 
-    # Land use domain.
-    if domain_code == "RL" and ("area" in e or u in {"ha", "1000 ha", "thousand ha"}):
-        return "Land use"
+    if domain_code == "RL":
+        if "area" in e or u in {"ha", "1000 ha", "thousand ha"}:
+            return "Land use"
+        return None
 
     if domain_code != "QCL":
         return None
 
-    # Crop and livestock production, including milk, meat, eggs etc.
-    # Keep only production-like values and preserve exact FAOSTAT unit separately.
-    if "production" in e:
-        if any(token in u for token in ["t", "tonne", "tonnes"]):
-            # Milk is included here when FAOSTAT reports it as production in tonnes.
-            if any(token in i for token in ["milk", "meat", "egg", "honey", "wool", "hide", "skin"]):
-                return "Livestock products"
-            return "Agricultural production"
-
-        # Some livestock products can be reported in numbers, e.g. eggs.
-        if any(token in u for token in ["no", "1000 no", "head"]):
-            if any(token in i for token in ["egg", "hides", "skins"]):
-                return "Livestock products"
-
-    # Harvested area for crops.
+    # Crops and crop production.
     if "area harvested" in e:
         return "Harvested area"
 
-    # Livestock numbers / animal stocks.
-    if any(token in e for token in ["stocks", "producing animals", "animals live", "laying", "milking"]):
+    if "production" in e:
+        if any(token in u for token in ["t", "tonne", "tonnes"]):
+            if any(
+                token in i
+                for token in [
+                    "milk",
+                    "meat",
+                    "egg",
+                    "honey",
+                    "wool",
+                    "hide",
+                    "skin",
+                    "silk",
+                ]
+            ):
+                return "Livestock products"
+
+            return "Agricultural production"
+
+        if any(token in u for token in ["no", "1000 no", "head", "1000 head"]):
+            if any(token in i for token in ["egg", "hides", "skins"]):
+                return "Livestock products"
+
+    # Livestock stocks.
+    if any(
+        token in e
+        for token in [
+            "stocks",
+            "producing animals",
+            "animals live",
+            "laying",
+            "milking",
+        ]
+    ):
         if any(token in u for token in ["head", "1000 head", "no", "1000 no"]):
             return "Livestock stocks"
 
-    # Slaughtered animals, if available.
-    if "producing or slaughtered animals" in e or "slaughtered animals" in e:
+    if "slaughtered animals" in e or "producing or slaughtered animals" in e:
         if any(token in u for token in ["head", "1000 head", "no", "1000 no"]):
             return "Slaughtered animals"
 
@@ -240,7 +275,20 @@ def load_population(pop_df: pd.DataFrame) -> pd.DataFrame:
 
 def prepare(force: bool = False) -> pd.DataFrame:
     if OUTFILE.exists() and not force:
-        return pd.read_parquet(OUTFILE)
+        existing = pd.read_parquet(OUTFILE)
+
+        required = {
+            "Agricultural production",
+            "Harvested area",
+            "Land use",
+            "Livestock products",
+            "Livestock stocks",
+        }
+
+        if required.issubset(set(existing["metric_group"].dropna().unique())):
+            return existing
+
+        print("Existing processed file is incomplete. Rebuilding data.")
 
     frames = {}
 
@@ -251,11 +299,17 @@ def prepare(force: bool = False) -> pd.DataFrame:
 
     pop = load_population(frames["OA"])
 
-    data = pd.concat([frames["QCL"], frames["RL"]], ignore_index=True)
+    data = pd.concat(
+        [
+            frames["QCL"],
+            frames["RL"],
+        ],
+        ignore_index=True,
+    )
 
     data["metric_group"] = [
-        classify_metric(d, e, u, i)
-        for d, e, u, i in zip(
+        classify_metric(domain_code, element, unit, item)
+        for domain_code, element, unit, item in zip(
             data["domain_code"],
             data["element"],
             data["unit"],
@@ -268,7 +322,6 @@ def prepare(force: bool = False) -> pd.DataFrame:
     data = data.merge(pop, on=["area", "year"], how="left")
     data["value_per_capita"] = data["value"] / data["population_persons"]
 
-    # Compact key for Streamlit selectors.
     data["series"] = (
         data["item"].astype(str)
         + " — "
@@ -281,7 +334,7 @@ def prepare(force: bool = False) -> pd.DataFrame:
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
     data.to_parquet(OUTFILE, index=False)
-    data.to_csv(PROCESSED_DIR / "faostat_eastern_europe_long.csv.gz", index=False)
+    data.to_csv(PROCESSED_DIR / "faostat_eastern_europe_long_v3.csv.gz", index=False)
 
     print(f"Saved {len(data):,} rows to {OUTFILE}")
 
