@@ -11,7 +11,7 @@ from scripts.download_prepare_faostat import OUTFILE, prepare
 
 st.set_page_config(page_title="FAOSTAT Eastern Europe", layout="wide")
 
-st.title("FAOSTAT: zemědělská produkce a land use ve východní Evropě")
+st.title("FAOSTAT: zemědělská produkce, hospodářská zvířata a land use ve východní Evropě")
 st.caption(
     "Časové řady od roku 1961 podle dostupnosti v FAOSTAT. "
     "U některých států začínají samostatné řady až po rozpadu dřívějších státních celků."
@@ -19,15 +19,21 @@ st.caption(
 
 
 @st.cache_data(show_spinner=True, ttl=24 * 60 * 60)
-def load_data() -> pd.DataFrame:
+def load_data(force: bool = False) -> pd.DataFrame:
     path = Path(OUTFILE)
-    if not path.exists():
-        return prepare()
+
+    if force or not path.exists():
+        return prepare(force=True)
+
     return pd.read_parquet(path)
 
 
+with st.sidebar:
+    refresh_data = st.button("Obnovit / znovu stáhnout FAOSTAT data")
+
+
 with st.spinner("Načítám data. Při prvním spuštění se stáhnou bulk soubory z FAOSTAT."):
-    df = load_data()
+    df = load_data(force=refresh_data)
 
 
 # -------------------------------------------------------------------
@@ -155,8 +161,6 @@ selected_countries = [
 # -------------------------------------------------------------------
 # Shared legend preparation
 # -------------------------------------------------------------------
-# First, identify all series that will appear in at least one country chart.
-# This ensures that the shared legend corresponds to the actual plotted series.
 
 visible_series = set()
 
@@ -189,12 +193,10 @@ series_order = (
     .tolist()
 )
 
-# "Other" is used in country charts for all non-top categories.
 if "Other" not in series_order:
     series_order.append("Other")
 
 
-# Shared color palette for both the sticky legend and all charts.
 # Calm land-use / agriculture palette: greens, yellows, browns, reds, blues.
 palette = [
     "#2E7D32",  # dark green
@@ -271,7 +273,7 @@ legend_html = """
 </style>
 
 <div class="sticky-legend">
-  <div class="sticky-legend-title">Společná legenda</div>
+  <div class="sticky-legend-title">Společná legenda pro grafy podle zemí</div>
   <div class="sticky-legend-items">
 """
 
@@ -289,123 +291,277 @@ legend_html += f"""
 </div>
 """
 
-st.markdown(legend_html, unsafe_allow_html=True)
+
+# -------------------------------------------------------------------
+# Tabs
+# -------------------------------------------------------------------
+
+tab_charts, tab_map = st.tabs(["Grafy podle zemí", "Kartogram Evropy"])
 
 
 # -------------------------------------------------------------------
-# Country chart grid
+# Tab 1: Country chart grid
 # -------------------------------------------------------------------
 
-for i in range(0, len(selected_countries), n_cols):
-    cols = st.columns(n_cols)
+with tab_charts:
+    st.markdown(legend_html, unsafe_allow_html=True)
 
-    for j, country in enumerate(selected_countries[i:i + n_cols]):
-        d = base[base["area"] == country].copy()
+    for i in range(0, len(selected_countries), n_cols):
+        cols = st.columns(n_cols)
 
-        if d.empty:
-            continue
+        for j, country in enumerate(selected_countries[i:i + n_cols]):
+            d = base[base["area"] == country].copy()
 
-        # Choose top series by latest available value and aggregate the remaining series as Other.
-        latest_year = d.groupby("series")["year"].max().rename("latest_year")
-        latest = d.merge(latest_year, on="series")
-        latest = latest[latest["year"] == latest["latest_year"]]
+            if d.empty:
+                continue
 
-        top_series = (
-            latest.groupby("series", as_index=False)[value_col]
-            .sum()
-            .sort_values(value_col, ascending=False)
-            .head(top_n)["series"]
-            .tolist()
-        )
+            latest_year = d.groupby("series")["year"].max().rename("latest_year")
+            latest = d.merge(latest_year, on="series")
+            latest = latest[latest["year"] == latest["latest_year"]]
 
-        d["series_plot"] = d["series"].where(
-            d["series"].isin(top_series),
-            "Other",
-        )
+            top_series = (
+                latest.groupby("series", as_index=False)[value_col]
+                .sum()
+                .sort_values(value_col, ascending=False)
+                .head(top_n)["series"]
+                .tolist()
+            )
 
-        plot = (
-            d.groupby(["year", "series_plot"], as_index=False)[value_col]
-            .sum()
-        )
+            d["series_plot"] = d["series"].where(
+                d["series"].isin(top_series),
+                "Other",
+            )
 
-        # Make sure Plotly uses the same category order as the shared legend.
-        plot["series_plot"] = pd.Categorical(
-            plot["series_plot"],
-            categories=series_order,
-            ordered=True,
-        )
+            plot = (
+                d.groupby(["year", "series_plot"], as_index=False)[value_col]
+                .sum()
+            )
 
-        plot = plot.sort_values(["series_plot", "year"])
+            plot["series_plot"] = pd.Categorical(
+                plot["series_plot"],
+                categories=series_order,
+                ordered=True,
+            )
 
-        with cols[j]:
-            with st.container(border=True):
-                st.markdown(f"#### {country}")
+            plot = plot.sort_values(["series_plot", "year"])
 
-                if chart_type == "Plošný kumulativní":
-                    fig = px.area(
-                        plot,
-                        x="year",
-                        y=value_col,
-                        color="series_plot",
-                        color_discrete_map=color_map,
-                        category_orders={"series_plot": series_order},
-                        labels={
-                            "year": "rok",
-                            value_col: y_label,
-                            "series_plot": "položka",
-                        },
-                    )
-                else:
-                    fig = px.line(
-                        plot,
-                        x="year",
-                        y=value_col,
-                        color="series_plot",
-                        color_discrete_map=color_map,
-                        category_orders={"series_plot": series_order},
-                        labels={
-                            "year": "rok",
-                            value_col: y_label,
-                            "series_plot": "položka",
-                        },
-                    )
+            with cols[j]:
+                with st.container(border=True):
+                    st.markdown(f"#### {country}")
 
-                fig.update_layout(
-                    height=chart_height,
-                    showlegend=False,
-                    margin=dict(l=5, r=5, t=25, b=5),
-                    font=dict(size=10),
-                )
+                    if chart_type == "Plošný kumulativní":
+                        fig = px.area(
+                            plot,
+                            x="year",
+                            y=value_col,
+                            color="series_plot",
+                            color_discrete_map=color_map,
+                            category_orders={"series_plot": series_order},
+                            labels={
+                                "year": "rok",
+                                value_col: y_label,
+                                "series_plot": "položka",
+                            },
+                        )
+                    else:
+                        fig = px.line(
+                            plot,
+                            x="year",
+                            y=value_col,
+                            color="series_plot",
+                            color_discrete_map=color_map,
+                            category_orders={"series_plot": series_order},
+                            labels={
+                                "year": "rok",
+                                value_col: y_label,
+                                "series_plot": "položka",
+                            },
+                        )
 
-                fig.update_xaxes(
-                    title_text="rok",
-                    title_font=dict(size=10),
-                    tickfont=dict(size=9),
-                )
-
-                fig.update_yaxes(
-                    title_text=y_label,
-                    title_font=dict(size=10),
-                    tickfont=dict(size=9),
-                )
-
-                st.plotly_chart(fig, use_container_width=True)
-
-                with st.expander("Data"):
-                    st.dataframe(
-                        plot,
-                        use_container_width=True,
-                        hide_index=True,
+                    fig.update_layout(
+                        height=chart_height,
+                        showlegend=False,
+                        margin=dict(l=5, r=5, t=25, b=5),
+                        font=dict(size=10),
                     )
 
-                    st.download_button(
-                        "CSV",
-                        data=plot.to_csv(index=False).encode("utf-8"),
-                        file_name=(
-                            f"faostat_"
-                            f"{country.replace(' ', '_')}_"
-                            f"{metric_group.replace(' ', '_')}_"
-                            f"{selected_unit.replace(' ', '_')}.csv"
-                        ),
-                        mime="text/csv",
+                    fig.update_xaxes(
+                        title_text="rok",
+                        title_font=dict(size=10),
+                        tickfont=dict(size=9),
                     )
+
+                    fig.update_yaxes(
+                        title_text=y_label,
+                        title_font=dict(size=10),
+                        tickfont=dict(size=9),
+                    )
+
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    with st.expander("Data"):
+                        st.dataframe(
+                            plot,
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                        st.download_button(
+                            "CSV",
+                            data=plot.to_csv(index=False).encode("utf-8"),
+                            file_name=(
+                                f"faostat_"
+                                f"{country.replace(' ', '_')}_"
+                                f"{metric_group.replace(' ', '_')}_"
+                                f"{selected_unit.replace(' ', '_')}.csv"
+                            ),
+                            mime="text/csv",
+                        )
+
+
+# -------------------------------------------------------------------
+# Tab 2: Choropleth map of Europe
+# -------------------------------------------------------------------
+
+with tab_map:
+    st.markdown("### Kartogram Evropy")
+
+    st.caption(
+        "Kartogram zobrazuje jednu vybranou položku pro vybraný rok. "
+        "Data jsou filtrována podle stejné datové oblasti, jednotky a vyjádření jako grafy."
+    )
+
+    map_c1, map_c2 = st.columns([1, 2])
+
+    available_map_years = sorted(base["year"].dropna().unique())
+
+    with map_c1:
+        map_year = st.selectbox(
+            "Rok pro mapu",
+            available_map_years,
+            index=len(available_map_years) - 1,
+        )
+
+    available_map_series = sorted(base["series"].dropna().unique())
+
+    with map_c2:
+        map_series = st.selectbox(
+            "Položka pro kartogram",
+            available_map_series,
+            index=0,
+        )
+
+    iso3_map = {
+        "Albania": "ALB",
+        "Belarus": "BLR",
+        "Bosnia and Herzegovina": "BIH",
+        "Bulgaria": "BGR",
+        "Croatia": "HRV",
+        "Czechia": "CZE",
+        "Czech Republic": "CZE",
+        "Estonia": "EST",
+        "Hungary": "HUN",
+        "Latvia": "LVA",
+        "Lithuania": "LTU",
+        "Montenegro": "MNE",
+        "North Macedonia": "MKD",
+        "Poland": "POL",
+        "Republic of Moldova": "MDA",
+        "Moldova": "MDA",
+        "Romania": "ROU",
+        "Russian Federation": "RUS",
+        "Russia": "RUS",
+        "Serbia": "SRB",
+        "Slovakia": "SVK",
+        "Slovenia": "SVN",
+        "Ukraine": "UKR",
+    }
+
+    map_data = base[
+        (base["year"] == map_year)
+        & (base["series"] == map_series)
+    ].copy()
+
+    map_data = (
+        map_data.groupby(["area"], as_index=False)[value_col]
+        .sum()
+    )
+
+    map_data["iso3"] = map_data["area"].map(iso3_map)
+
+    missing_iso = (
+        map_data[map_data["iso3"].isna()]["area"]
+        .dropna()
+        .unique()
+        .tolist()
+    )
+
+    map_data = map_data.dropna(subset=["iso3"])
+
+    if map_data.empty:
+        st.warning("Pro vybranou položku a rok nejsou dostupná mapová data.")
+    else:
+        fig_map = px.choropleth(
+            map_data,
+            locations="iso3",
+            color=value_col,
+            hover_name="area",
+            hover_data={
+                "iso3": False,
+                value_col: ":,.2f",
+            },
+            color_continuous_scale=[
+                "#FFF7BC",
+                "#FEC44F",
+                "#FE9929",
+                "#D95F0E",
+                "#993404",
+            ],
+            labels={
+                value_col: y_label,
+            },
+            title=f"{map_series}, {map_year} — {y_label}",
+            scope="europe",
+        )
+
+        fig_map.update_geos(
+            showcountries=True,
+            showcoastlines=True,
+            showland=True,
+            fitbounds="locations",
+        )
+
+        fig_map.update_layout(
+            height=650,
+            margin=dict(l=0, r=0, t=55, b=0),
+            coloraxis_colorbar=dict(
+                title=y_label,
+            ),
+        )
+
+        st.plotly_chart(fig_map, use_container_width=True)
+
+        with st.expander("Data použitá pro mapu"):
+            st.dataframe(
+                map_data.sort_values(value_col, ascending=False),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            st.download_button(
+                "Stáhnout mapová data jako CSV",
+                data=map_data.to_csv(index=False).encode("utf-8"),
+                file_name=(
+                    f"faostat_map_"
+                    f"{metric_group.replace(' ', '_')}_"
+                    f"{selected_unit.replace(' ', '_')}_"
+                    f"{map_year}.csv"
+                ),
+                mime="text/csv",
+            )
+
+        if missing_iso:
+            st.info(
+                "Tyto země nebyly zobrazeny, protože pro ně chybí ISO3 mapování: "
+                + ", ".join(missing_iso)
+            )
