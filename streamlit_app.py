@@ -59,39 +59,82 @@ c1.metric("Země", base["area"].nunique())
 c2.metric("Roky", f"{int(base['year'].min())}–{int(base['year'].max())}")
 c3.metric("Řádků dat", f"{len(base):,}".replace(",", " "))
 
-for country in countries:
-    d = base[base["area"] == country].copy()
-    if d.empty:
-        continue
+with st.sidebar:
+    n_cols = st.slider("Počet grafů v řádku", 1, 4, 3)
+    chart_height = st.slider("Výška grafu", 220, 500, 280)
 
-    # Choose top series by latest available value and aggregate remaining as Other.
-    latest_year = d.groupby("series")["year"].max().rename("latest_year")
-    latest = d.merge(latest_year, on="series")
-    latest = latest[latest["year"] == latest["latest_year"]]
-    top_series = (
-        latest.groupby("series", as_index=False)[value_col]
-        .sum()
-        .sort_values(value_col, ascending=False)
-        .head(top_n)["series"]
-        .tolist()
-    )
-    d["series_plot"] = d["series"].where(d["series"].isin(top_series), "Other")
-    plot = d.groupby(["year", "series_plot"], as_index=False)[value_col].sum()
+selected_countries = [c for c in countries if not base[base["area"] == c].empty]
 
-    with st.container(border=True):
-        st.markdown(f"### {country}")
-        if chart_type == "Plošný kumulativní":
-            fig = px.area(plot, x="year", y=value_col, color="series_plot", labels={"year": "rok", value_col: y_label, "series_plot": "položka"})
-        else:
-            fig = px.line(plot, x="year", y=value_col, color="series_plot", labels={"year": "rok", value_col: y_label, "series_plot": "položka"})
-        fig.update_layout(height=420, legend_title_text="", margin=dict(l=10, r=10, t=30, b=10))
-        st.plotly_chart(fig, use_container_width=True)
+for i in range(0, len(selected_countries), n_cols):
+    cols = st.columns(n_cols)
 
-        with st.expander("Data ke stažení"):
-            st.dataframe(plot, use_container_width=True, hide_index=True)
-            st.download_button(
-                "Stáhnout CSV pro tuto zemi",
-                data=plot.to_csv(index=False).encode("utf-8"),
-                file_name=f"faostat_{country.replace(' ', '_')}_{metric_group.replace(' ', '_')}.csv",
-                mime="text/csv",
-            )
+    for j, country in enumerate(selected_countries[i:i + n_cols]):
+        d = base[base["area"] == country].copy()
+        if d.empty:
+            continue
+
+        # Choose top series by latest available value and aggregate remaining as Other.
+        latest_year = d.groupby("series")["year"].max().rename("latest_year")
+        latest = d.merge(latest_year, on="series")
+        latest = latest[latest["year"] == latest["latest_year"]]
+
+        top_series = (
+            latest.groupby("series", as_index=False)[value_col]
+            .sum()
+            .sort_values(value_col, ascending=False)
+            .head(top_n)["series"]
+            .tolist()
+        )
+
+        d["series_plot"] = d["series"].where(d["series"].isin(top_series), "Other")
+        plot = d.groupby(["year", "series_plot"], as_index=False)[value_col].sum()
+
+        with cols[j]:
+            with st.container(border=True):
+                st.markdown(f"#### {country}")
+
+                if chart_type == "Plošný kumulativní":
+                    fig = px.area(
+                        plot,
+                        x="year",
+                        y=value_col,
+                        color="series_plot",
+                        labels={
+                            "year": "rok",
+                            value_col: y_label,
+                            "series_plot": "položka",
+                        },
+                    )
+                else:
+                    fig = px.line(
+                        plot,
+                        x="year",
+                        y=value_col,
+                        color="series_plot",
+                        labels={
+                            "year": "rok",
+                            value_col: y_label,
+                            "series_plot": "položka",
+                        },
+                    )
+
+                fig.update_layout(
+                    height=chart_height,
+                    legend_title_text="",
+                    margin=dict(l=5, r=5, t=25, b=5),
+                    font=dict(size=10),
+                )
+
+                fig.update_xaxes(title_font=dict(size=10), tickfont=dict(size=9))
+                fig.update_yaxes(title_font=dict(size=10), tickfont=dict(size=9))
+
+                st.plotly_chart(fig, use_container_width=True)
+
+                with st.expander("Data"):
+                    st.dataframe(plot, use_container_width=True, hide_index=True)
+                    st.download_button(
+                        "CSV",
+                        data=plot.to_csv(index=False).encode("utf-8"),
+                        file_name=f"faostat_{country.replace(' ', '_')}_{metric_group.replace(' ', '_')}.csv",
+                        mime="text/csv",
+                    )
